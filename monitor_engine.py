@@ -31,7 +31,7 @@ def _arp_loop():
     while not _stop_event.is_set():
         current_devices = scan_network()
         traffic_monitor.sync_active_devices(current_devices, entry_point)
-        _stop_event.wait(30)
+        _stop_event.wait(15)
 
 def start_background_tasks():
     _stop_event.clear()

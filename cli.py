@@ -70,10 +70,10 @@ def render_cli():
     header_text = f"Interface: {config.INTERFACE}  |  Subnet: {config.NETWORK_SUBNET}  |  Limit 1: {config.DATA_LIMIT_ALERT_BYTES / (1024**3):.2f} GB  |  Limit 2: {config.DATA_LIMIT_BLOCK_BYTES / (1024**3):.2f} GB"
     layout["header"].update(Panel(header_text, style="white on blue"))
     
-    with Live(layout, console=console, refresh_per_second=2) as live:
+    with Live(layout, console=console, refresh_per_second=4) as live:
         try:
             while True:
                 layout["main"].update(generate_table())
-                time.sleep(1)
+                time.sleep(0.25)
         except KeyboardInterrupt:
             pass

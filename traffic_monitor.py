@@ -1,6 +1,7 @@
 import logging
 import threading
 import socket
+import time
 from typing import Dict, Tuple, List
 
 from scapy.all import sniff, IP, TCP, UDP, DNSQR
@@ -21,6 +22,7 @@ class DeviceState:
         self.alerted_stage1 = False
         self.alerted_stage2 = False
         self.current_session_id = None
+        self.last_seen = 0.0
         self.ports = {} # (proto, port) -> bytes
 
 _sessions_lock = threading.Lock()
@@ -42,10 +44,13 @@ def sync_active_devices(current_devices: Dict[str, str], entry_point: str) -> No
         
         # Check for disconnected devices
         active_macs = set(current_devices.keys())
+        current_time = time.time()
         for mac, state in _devices.items():
             if mac not in active_macs and state.current_session_id is not None:
-                db.end_session(state.current_session_id, state.bytes_used_run) # Approx, but good enough for history
-                state.current_session_id = None
+                # Disconnect if missing from ARP AND hasn't sent a packet in 120 seconds
+                if current_time - state.last_seen > 120:
+                    db.end_session(state.current_session_id, state.bytes_used_run) # Approx, but good enough for history
+                    state.current_session_id = None
                 
         # Check for new connections
         for mac, ip in current_devices.items():
@@ -60,6 +65,7 @@ def sync_active_devices(current_devices: Dict[str, str], entry_point: str) -> No
                 
             state = _devices[mac]
             state.ip = ip # Update IP if it changed
+            state.last_seen = current_time # Responded to ARP!
             if state.current_session_id is None:
                 # Started a new session
                 sess_id = db.start_session(mac, entry_point)
@@ -101,6 +107,7 @@ def _handle_packet(pkt):
             return
             
         state.bytes_used_run += pkt_len
+        state.last_seen = time.time()
         
         # Track DNS queries for history
         if pkt.haslayer(DNSQR):
