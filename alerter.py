@@ -9,6 +9,7 @@ _log = logging.getLogger("network_monitor.alerter")
 def build_alert_body(
     mac: str,
     ip: str,
+    name: str,
     reason: str,
     data_usage_mb: float,
     entry_point: str,
@@ -22,11 +23,12 @@ def build_alert_body(
         f"Reason: {reason}",
         "",
         "Device Details:",
+        f"- Device Name: {name}",
         f"- MAC Address: {mac}",
         f"- Current IP: {ip}",
         f"- Entry Point (Interface/Subnet): {entry_point}",
-        f"- Lifetime Connections: {connection_count}",
-        f"- Data Used this Session: {data_usage_mb:.2f} MB",
+        f"- Connections (Last 24h): {connection_count}",
+        f"- Data Used (This Session): {data_usage_mb:.2f} MB",
         "",
         "Recent Browsing History (DNS Domains):"
     ]
@@ -44,7 +46,7 @@ def build_alert_body(
 
 def send_alert(subject: str, body: str) -> bool:
     if not config.EMAIL_ALERTS_ENABLED:
-        _log.warning("Email alerts are disabled (missing SMTP_USERNAME or SMTP_PASSWORD in .env). Alert not sent.")
+        _log.error("Email alerts are disabled (missing SMTP_USERNAME or SMTP_PASSWORD in .env).")
         return False
         
     msg = MIMEText(body)
@@ -59,10 +61,7 @@ def send_alert(subject: str, body: str) -> bool:
             server.ehlo()
             server.login(config.SMTP_USERNAME, config.SMTP_PASSWORD)
             server.send_message(msg)
-        _log.info(f"Alert email successfully sent: {subject}")
         return True
-    except smtplib.SMTPAuthenticationError:
-        _log.error("SMTP Authentication failed! Check your App Password in the .env file.")
     except Exception as e:
         _log.error(f"Failed to send email: {e}")
     

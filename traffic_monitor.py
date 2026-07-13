@@ -1,6 +1,7 @@
 import logging
 import threading
-from typing import Dict, Optional, Tuple
+import socket
+from typing import Dict, Tuple, List
 
 from scapy.all import sniff, IP, TCP, UDP, DNSQR
 import config
@@ -11,47 +12,83 @@ import geolocation
 
 _log = logging.getLogger("network_monitor.traffic")
 
-class Session:
-    def __init__(self, mac: str, ip: str, session_id: int):
+class DeviceState:
+    def __init__(self, mac: str, ip: str, name: str):
         self.mac = mac
         self.ip = ip
-        self.session_id = session_id
-        self.bytes_used = 0
+        self.name = name
+        self.bytes_used_run = 0
         self.alerted_stage1 = False
         self.alerted_stage2 = False
+        self.current_session_id = None
         self.ports = {} # (proto, port) -> bytes
 
 _sessions_lock = threading.Lock()
-_active_sessions: Dict[str, Session] = {}
+_devices: Dict[str, DeviceState] = {}
 _ip_to_mac: Dict[str, str] = {}
 
+def _resolve_hostname(ip: str) -> str:
+    try:
+        name, _, _ = socket.gethostbyaddr(ip)
+        return name
+    except Exception:
+        return "Unknown"
+
 def sync_active_devices(current_devices: Dict[str, str], entry_point: str) -> None:
-    """Called periodically by main loop to update IP->MAC mapping and start/stop sessions."""
+    """Main loop calls this periodically to start/stop sessions and sync IP mapping."""
     global _ip_to_mac
     with _sessions_lock:
         _ip_to_mac = {ip: mac for mac, ip in current_devices.items()}
         
         # Check for disconnected devices
-        disconnected = set(_active_sessions.keys()) - set(current_devices.keys())
-        for mac in disconnected:
-            sess = _active_sessions.pop(mac)
-            db.end_session(sess.session_id, sess.bytes_used)
-            _log.info(f"Device {mac} disconnected. Session {sess.session_id} ended with {sess.bytes_used} bytes.")
-            
-        # Check for newly connected devices
+        active_macs = set(current_devices.keys())
+        for mac, state in _devices.items():
+            if mac not in active_macs and state.current_session_id is not None:
+                db.end_session(state.current_session_id, state.bytes_used_run) # Approx, but good enough for history
+                state.current_session_id = None
+                
+        # Check for new connections
         for mac, ip in current_devices.items():
-            if mac not in _active_sessions:
-                db.record_connection(mac)
+            if mac not in _devices:
+                # First time seeing this device this run
+                name = db.get_device_name(mac)
+                if name == "Unknown":
+                    name = _resolve_hostname(ip)
+                    if name != "Unknown":
+                        db.save_device_name(mac, name)
+                _devices[mac] = DeviceState(mac, ip, name)
+                
+            state = _devices[mac]
+            state.ip = ip # Update IP if it changed
+            if state.current_session_id is None:
+                # Started a new session
                 sess_id = db.start_session(mac, entry_point)
-                _active_sessions[mac] = Session(mac, ip, sess_id)
-                _log.info(f"Device {mac} ({ip}) joined. Started session {sess_id}.")
+                state.current_session_id = sess_id
+
+def get_dashboard_data() -> List[dict]:
+    with _sessions_lock:
+        rows = []
+        for mac, state in _devices.items():
+            if state.current_session_id is not None: # Currently active
+                top_port = None
+                if state.ports:
+                    top_port = max(state.ports.items(), key=lambda kv: kv[1])[0]
+                rows.append({
+                    "mac": mac,
+                    "ip": state.ip,
+                    "name": state.name,
+                    "bytes": state.bytes_used_run,
+                    "top_port": top_port,
+                    "connections_24h": db.get_connections_last_24h(mac),
+                    "location": geolocation.get_location(state.ip)
+                })
+        return rows
 
 def _handle_packet(pkt):
     if IP not in pkt:
         return
         
     src_ip = pkt[IP].src
-    dst_ip = pkt[IP].dst
     pkt_len = len(pkt)
     
     mac = _ip_to_mac.get(src_ip)
@@ -59,85 +96,77 @@ def _handle_packet(pkt):
         return
         
     with _sessions_lock:
-        sess = _active_sessions.get(mac)
-        if not sess:
+        state = _devices.get(mac)
+        if not state or state.current_session_id is None:
             return
             
-        sess.bytes_used += pkt_len
+        state.bytes_used_run += pkt_len
         
         # Track DNS queries for history
         if pkt.haslayer(DNSQR):
             try:
                 domain = pkt[DNSQR].qname.decode(errors="ignore").rstrip(".")
-                db.log_domain(sess.session_id, domain)
+                db.log_domain(state.current_session_id, domain)
             except Exception:
                 pass
                 
         # Track ports
         proto = sport = dport = None
         if TCP in pkt:
-            proto, sport, dport = "tcp", pkt[TCP].sport, pkt[TCP].dport
+            proto, dport = "tcp", pkt[TCP].dport
         elif UDP in pkt:
-            proto, sport, dport = "udp", pkt[UDP].sport, pkt[UDP].dport
+            proto, dport = "udp", pkt[UDP].dport
             
         if proto:
             port_key = (proto, dport)
-            sess.ports[port_key] = sess.ports.get(port_key, 0) + pkt_len
+            state.ports[port_key] = state.ports.get(port_key, 0) + pkt_len
 
-        # Check Limits!
-        _check_limits(sess)
+        _check_limits(state)
 
-def _check_limits(sess: Session):
-    # This is called inside the _sessions_lock, so it must be fast.
-    # To avoid blocking the sniffer on SMTP (email), we should launch alerts in a thread.
-    
+def _check_limits(state: DeviceState):
     # Stage 1: Alert
-    if sess.bytes_used > config.DATA_LIMIT_ALERT_BYTES and not sess.alerted_stage1:
-        sess.alerted_stage1 = True
-        threading.Thread(target=_fire_stage1_alert, args=(sess.mac, sess.ip, sess.session_id, sess.bytes_used), daemon=True).start()
+    if state.bytes_used_run > config.DATA_LIMIT_ALERT_BYTES and not state.alerted_stage1:
+        state.alerted_stage1 = True
+        threading.Thread(target=_fire_stage1_alert, args=(state,), daemon=True).start()
         
     # Stage 2: Block
-    if sess.bytes_used > config.DATA_LIMIT_BLOCK_BYTES and not sess.alerted_stage2:
-        sess.alerted_stage2 = True
-        # Find the most active port
+    if state.bytes_used_run > config.DATA_LIMIT_BLOCK_BYTES and not state.alerted_stage2:
+        state.alerted_stage2 = True
         top_port = None
-        if sess.ports:
-            top_port = max(sess.ports.items(), key=lambda kv: kv[1])[0]
-            
-        threading.Thread(target=_fire_stage2_block, args=(sess.mac, sess.ip, sess.session_id, sess.bytes_used, top_port), daemon=True).start()
+        if state.ports:
+            top_port = max(state.ports.items(), key=lambda kv: kv[1])[0]
+        threading.Thread(target=_fire_stage2_block, args=(state, top_port), daemon=True).start()
 
-def _fire_stage1_alert(mac, ip, session_id, bytes_used):
-    mb = bytes_used / (1024 * 1024)
-    conn_count = db.get_connection_count(mac)
-    domains = db.get_session_domains(session_id)
-    
-    geo = geolocation.get_location(ip) # if they were external, though usually this is local.
+def _fire_stage1_alert(state: DeviceState):
+    mb = state.bytes_used_run / (1024 * 1024)
+    conn_count = db.get_connections_last_24h(state.mac)
+    domains = db.get_session_domains(state.current_session_id)
     entry = f"{config.INTERFACE} / {config.NETWORK_SUBNET}"
     
     body = alerter.build_alert_body(
-        mac=mac, ip=ip, 
-        reason="Data usage exceeded Stage 1 (Alert) limit.",
+        mac=state.mac, ip=state.ip, name=state.name,
+        reason="Data usage exceeded Limit 1 (Alert).",
         data_usage_mb=mb, entry_point=entry, 
         connection_count=conn_count, recent_domains=domains
     )
     alerter.send_alert("⚠️ Network Alert: High Data Usage", body)
 
-def _fire_stage2_block(mac, ip, session_id, bytes_used, top_port):
-    mb = bytes_used / (1024 * 1024)
-    conn_count = db.get_connection_count(mac)
-    domains = db.get_session_domains(session_id)
+def _fire_stage2_block(state: DeviceState, top_port):
+    mb = state.bytes_used_run / (1024 * 1024)
+    conn_count = db.get_connections_last_24h(state.mac)
+    domains = db.get_session_domains(state.current_session_id)
+    entry = f"{config.INTERFACE} / {config.NETWORK_SUBNET}"
     
     if top_port:
         proto, port = top_port
-        blocker.block_port(ip, port, proto)
-        action_msg = f"Blocked {proto.upper()} Port {port} for exceeding Stage 2."
+        blocker.block_port(state.ip, port, proto)
+        action_msg = f"Blocked {proto.upper()} Port {port} for exceeding Limit 2 (Block)."
     else:
-        blocker.block_device(ip)
-        action_msg = "Blocked entire device for exceeding Stage 2 (no specific port found)."
+        blocker.block_device(state.ip)
+        action_msg = "Blocked entire device for exceeding Limit 2 (Block)."
         
-    entry = f"{config.INTERFACE} / {config.NETWORK_SUBNET}"
     body = alerter.build_alert_body(
-        mac=mac, ip=ip, 
+        mac=state.mac, ip=state.ip, name=state.name,
         reason=action_msg,
         data_usage_mb=mb, entry_point=entry, 
         connection_count=conn_count, recent_domains=domains

@@ -96,6 +96,5 @@ ALERT_EMAIL_TO: str = os.environ.get("ALERT_EMAIL_TO", ALERT_EMAIL_FROM).strip()
 # ---------------------------------------------------------------------------
 # Files
 # ---------------------------------------------------------------------------
-KNOWN_DEVICES_FILE: str = os.environ.get("KNOWN_DEVICES_FILE", "known_devices.json")
 DB_FILE: str = "monitor_history.db"
 MMDB_FILE: str = "GeoLite2-City.mmdb"

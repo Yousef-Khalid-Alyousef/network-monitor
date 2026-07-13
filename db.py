@@ -8,7 +8,6 @@ import config
 _db_lock = threading.Lock()
 
 def _get_conn():
-    # SQLite in Python can be tricky across threads if check_same_thread=True.
     return sqlite3.connect(config.DB_FILE, check_same_thread=False)
 
 def init_db():
@@ -17,7 +16,7 @@ def init_db():
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS devices (
                     mac TEXT PRIMARY KEY,
-                    connection_count INTEGER DEFAULT 0
+                    name TEXT
                 )
             ''')
             conn.execute('''
@@ -40,19 +39,29 @@ def init_db():
                 )
             ''')
 
-def record_connection(mac: str) -> None:
+def save_device_name(mac: str, name: str) -> None:
     with _db_lock:
         with _get_conn() as conn:
             conn.execute('''
-                INSERT INTO devices (mac, connection_count)
-                VALUES (?, 1)
-                ON CONFLICT(mac) DO UPDATE SET connection_count = connection_count + 1
-            ''', (mac,))
+                INSERT INTO devices (mac, name)
+                VALUES (?, ?)
+                ON CONFLICT(mac) DO UPDATE SET name = excluded.name
+            ''', (mac, name))
 
-def get_connection_count(mac: str) -> int:
+def get_device_name(mac: str) -> str:
     with _db_lock:
         with _get_conn() as conn:
-            row = conn.execute('SELECT connection_count FROM devices WHERE mac = ?', (mac,)).fetchone()
+            row = conn.execute('SELECT name FROM devices WHERE mac = ?', (mac,)).fetchone()
+            return row[0] if row and row[0] else "Unknown"
+
+def get_connections_last_24h(mac: str) -> int:
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=1)).isoformat()
+    with _db_lock:
+        with _get_conn() as conn:
+            row = conn.execute('''
+                SELECT COUNT(*) FROM sessions 
+                WHERE mac = ? AND start_time >= ?
+            ''', (mac, cutoff)).fetchone()
             return row[0] if row else 0
 
 def start_session(mac: str, entry_point: str) -> int:
