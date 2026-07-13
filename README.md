@@ -80,6 +80,12 @@ local law.
 - It creates `.venv`, installs `requirements.txt`, and starts `main.py`.
 - For best results, run it as **Administrator**.
 
+### Raspberry Pi OS one-click launcher
+- Run:
+  `chmod +x run_network_monitor_pi.sh && ./run_network_monitor_pi.sh`
+- It creates `.venv`, installs `requirements.txt`, then runs `main.py`.
+- If not already root, it auto re-launches with `sudo`.
+
 ## Files
 - `main.py` — orchestration loop
 - `device_scanner.py` — ARP-based device discovery
