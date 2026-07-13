@@ -55,9 +55,11 @@ local law.
 2. Edit `config.py`:
    - `NETWORK_SUBNET` — your LAN, e.g. `192.168.1.0/24`
    - `INTERFACE` — your network interface (`ip a` on Linux to list them)
-   - `SMTP_*` / `ALERT_EMAIL_*` — your email settings. For Gmail, use an
-     App Password (Google Account -> Security -> App Passwords), not your
-     normal password.
+   - `SMTP_*` / `ALERT_EMAIL_*` — optional email settings. If
+     `SMTP_USERNAME` / `SMTP_PASSWORD` are not set as environment variables,
+     email delivery is disabled and alerts remain in logs/console. For Gmail,
+     use an App Password (Google Account -> Security -> App Passwords), not
+     your normal password.
    - `DATA_TRIGGER_BYTES` / `TRIGGER_WINDOW_SECONDS` — tune once you've
      watched the dashboard for a few days and know your normal usage.
    - `AUTO_BLOCK_ENABLED` — starts `False` (log-only) on purpose. Flip to
@@ -72,6 +74,17 @@ local law.
    the dashboard for MACs to whitelist.
 4. Run as root (needed for packet capture, ARP, and firewall rules):
    `sudo python3 main.py`
+
+### Windows click-to-run launcher
+- Double-click `run_network_monitor.bat`.
+- It creates `.venv`, installs `requirements.txt`, and starts `main.py`.
+- For best results, run it as **Administrator**.
+
+### Raspberry Pi OS one-click launcher
+- Run:
+  `chmod +x run_network_monitor_pi.sh && ./run_network_monitor_pi.sh`
+- It creates `.venv`, installs `requirements.txt`, then runs `main.py`.
+- If not already root, it auto re-launches with `sudo`.
 
 ## Files
 - `main.py` — orchestration loop

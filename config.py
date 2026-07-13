@@ -2,9 +2,8 @@
 Central configuration for the network monitor.
 
 SECURITY: Credentials are loaded from environment variables, never hard-coded.
-Set the following env vars before running:
-    export SMTP_USERNAME="youraddress@gmail.com"
-    export SMTP_PASSWORD="your-app-password"
+Email is optional. If SMTP_USERNAME and SMTP_PASSWORD are not set, email
+delivery is disabled and alerts stay visible in the console/device logs.
 
 Optionally also set:
     export ALERT_EMAIL_TO="recipient@example.com"
@@ -20,19 +19,6 @@ import sys
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _require_env(name: str) -> str:
-    """Return the value of an environment variable or abort with a clear message."""
-    value = os.environ.get(name, "").strip()
-    if not value:
-        print(
-            f"[CONFIG ERROR] Required environment variable '{name}' is not set.\n"
-            f"  Set it before running:  export {name}='<value>'",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    return value
-
 
 def _validate_cidr(subnet: str) -> str:
     try:
@@ -78,17 +64,17 @@ CONNECTION_COUNT_WINDOW_HOURS: int = int(
 )
 
 # ---------------------------------------------------------------------------
-# Email alerts — credentials MUST come from environment variables
+# Email alerts — credentials come from environment variables (optional)
 # ---------------------------------------------------------------------------
 SMTP_SERVER: str = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT: int = int(os.environ.get("SMTP_PORT", "587"))
 
-# These two are required — the program will refuse to start without them.
-SMTP_USERNAME: str = _require_env("SMTP_USERNAME")
-SMTP_PASSWORD: str = _require_env("SMTP_PASSWORD")
+SMTP_USERNAME: str = os.environ.get("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD: str = os.environ.get("SMTP_PASSWORD", "").strip()
+EMAIL_ALERTS_ENABLED: bool = bool(SMTP_USERNAME and SMTP_PASSWORD)
 
-ALERT_EMAIL_FROM: str = os.environ.get("ALERT_EMAIL_FROM", SMTP_USERNAME)
-ALERT_EMAIL_TO: str = os.environ.get("ALERT_EMAIL_TO", SMTP_USERNAME)
+ALERT_EMAIL_FROM: str = os.environ.get("ALERT_EMAIL_FROM", SMTP_USERNAME).strip()
+ALERT_EMAIL_TO: str = os.environ.get("ALERT_EMAIL_TO", ALERT_EMAIL_FROM).strip()
 
 # Maximum number of alert emails per hour across all alert types.
 # Set high (50) so alerts fire freely during an incident; only suppress
