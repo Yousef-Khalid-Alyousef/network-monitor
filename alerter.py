@@ -72,6 +72,10 @@ def send_alert(subject: str, body: str) -> bool:
     Returns True if the email was sent, False if suppressed or failed.
     Credentials are loaded directly from config and are never logged.
     """
+    if not config.EMAIL_ALERTS_ENABLED:
+        _log.info("Email alerts disabled (SMTP_USERNAME/SMTP_PASSWORD not configured).")
+        return False
+
     now = datetime.datetime.now()
 
     # --- Rate-limit check (atomic: check + record under lock) ---
