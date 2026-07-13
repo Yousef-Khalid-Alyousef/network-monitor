@@ -1,70 +1,87 @@
-"""
-Central configuration for the network monitor.
-
-SECURITY: Credentials are loaded from environment variables, never hard-coded.
-Email is optional. If SMTP_USERNAME and SMTP_PASSWORD are not set, email
-delivery is disabled and alerts stay visible in the console/device logs.
-
-Optionally also set:
-    export ALERT_EMAIL_TO="recipient@example.com"
-
-All other values below can be edited directly.
-"""
-
 import ipaddress
+import logging
 import os
-import sys
+import socket
+from typing import Dict, List, Optional
 
+import psutil
+from dotenv import load_dotenv
+
+# Load settings from .env file
+load_dotenv()
+
+_log = logging.getLogger("network_monitor.config")
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _validate_cidr(subnet: str) -> str:
+def _detect_interfaces() -> List[Dict]:
+    stats = psutil.net_if_stats()
+    addrs = psutil.net_if_addrs()
+    results = []
+
+    for iface_name, addr_list in addrs.items():
+        if iface_name in stats and not stats[iface_name].isup:
+            continue
+        ipv4 = netmask = None
+        for addr in addr_list:
+            if addr.family == socket.AF_INET:
+                ipv4 = addr.address
+                netmask = addr.netmask
+        if not ipv4 or not netmask or ipv4.startswith("127."):
+            continue
+        try:
+            network = ipaddress.ip_network(f"{ipv4}/{netmask}", strict=False)
+            subnet = str(network)
+        except ValueError:
+            subnet = f"{ipv4}/24"
+        results.append({
+            "name": iface_name,
+            "ipv4": ipv4,
+            "subnet": subnet,
+        })
+    return results
+
+def _score_interface(iface: Dict) -> int:
+    name = iface["name"].lower()
+    score = 0
+    if name.startswith(("eth", "en")): score += 100
+    elif name.startswith("wlan") or name.startswith("wl"): score += 80
+    elif name.startswith("usb"): score += 60
+    elif name.startswith(("br", "bond")): score += 40
     try:
-        ipaddress.ip_network(subnet, strict=False)
-    except ValueError as exc:
-        print(f"[CONFIG ERROR] NETWORK_SUBNET '{subnet}' is not a valid CIDR: {exc}", file=sys.stderr)
-        sys.exit(1)
-    return subnet
+        if ipaddress.ip_address(iface["ipv4"]).is_private:
+            score += 50
+    except ValueError:
+        pass
+    return score
 
-
-def _validate_block_mode(mode: str) -> str:
-    allowed = {"port", "device"}
-    if mode not in allowed:
-        print(
-            f"[CONFIG ERROR] BLOCK_MODE must be one of {allowed}, got '{mode}'",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    return mode
-
+def _auto_select_interface() -> tuple[str, str]:
+    interfaces = _detect_interfaces()
+    if not interfaces:
+        return "eth0", "192.168.1.0/24"
+    interfaces.sort(key=_score_interface, reverse=True)
+    best = interfaces[0]
+    return best["name"], best["subnet"]
 
 # ---------------------------------------------------------------------------
-# Network
+# Network Setup
 # ---------------------------------------------------------------------------
-NETWORK_SUBNET: str = _validate_cidr(
-    os.environ.get("NETWORK_SUBNET", "192.168.1.0/24")
-)
-INTERFACE: str = os.environ.get("INTERFACE", "eth0")
-SCAN_INTERVAL_SECONDS: int = int(os.environ.get("SCAN_INTERVAL_SECONDS", "30"))
+_auto_iface, _auto_subnet = _auto_select_interface()
+INTERFACE: str = os.environ.get("INTERFACE", _auto_iface)
+NETWORK_SUBNET: str = os.environ.get("NETWORK_SUBNET", _auto_subnet)
 
 # ---------------------------------------------------------------------------
-# Data-usage trigger
-# 1 GB in 10 minutes is a safe starting point — adjust after observing normal use.
+# Data Limits (Bytes)
 # ---------------------------------------------------------------------------
-DATA_TRIGGER_BYTES: int = int(
-    os.environ.get("DATA_TRIGGER_BYTES", str(1 * 1024 * 1024 * 1024))
-)
-TRIGGER_WINDOW_SECONDS: int = int(os.environ.get("TRIGGER_WINDOW_SECONDS", "600"))
-
-# Rolling connection-count window (e.g. "how many times joined in the last 24h")
-CONNECTION_COUNT_WINDOW_HOURS: int = int(
-    os.environ.get("CONNECTION_COUNT_WINDOW_HOURS", "24")
-)
+# Limit 1: 1 GB
+DATA_LIMIT_ALERT_BYTES: int = int(os.environ.get("DATA_LIMIT_ALERT_BYTES", "1073741824"))
+# Limit 2: 3 GB
+DATA_LIMIT_BLOCK_BYTES: int = int(os.environ.get("DATA_LIMIT_BLOCK_BYTES", "3221225472"))
 
 # ---------------------------------------------------------------------------
-# Email alerts — credentials come from environment variables (optional)
+# Email Configuration
 # ---------------------------------------------------------------------------
 SMTP_SERVER: str = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT: int = int(os.environ.get("SMTP_PORT", "587"))
@@ -76,27 +93,9 @@ EMAIL_ALERTS_ENABLED: bool = bool(SMTP_USERNAME and SMTP_PASSWORD)
 ALERT_EMAIL_FROM: str = os.environ.get("ALERT_EMAIL_FROM", SMTP_USERNAME).strip()
 ALERT_EMAIL_TO: str = os.environ.get("ALERT_EMAIL_TO", ALERT_EMAIL_FROM).strip()
 
-# Maximum number of alert emails per hour across all alert types.
-# Set high (50) so alerts fire freely during an incident; only suppress
-# if something is clearly misbehaving and sending spam.
-MAX_ALERTS_PER_HOUR: int = int(os.environ.get("MAX_ALERTS_PER_HOUR", "50"))
-
-# ---------------------------------------------------------------------------
-# Response actions
-# ---------------------------------------------------------------------------
-AUTO_BLOCK_ENABLED: bool = os.environ.get("AUTO_BLOCK_ENABLED", "false").lower() == "true"
-BLOCK_MODE: str = _validate_block_mode(
-    os.environ.get("BLOCK_MODE", "port")
-)
-
 # ---------------------------------------------------------------------------
 # Files
 # ---------------------------------------------------------------------------
 KNOWN_DEVICES_FILE: str = os.environ.get("KNOWN_DEVICES_FILE", "known_devices.json")
-LOG_DIR: str = os.environ.get("LOG_DIR", "device_logs")
-
-# ---------------------------------------------------------------------------
-# Geolocation (free tier — ~45 requests / min)
-# ---------------------------------------------------------------------------
-GEOLOCATION_API: str = "http://ip-api.com/json/{ip}"
-GEOLOCATION_TIMEOUT_SECONDS: int = 3
+DB_FILE: str = "monitor_history.db"
+MMDB_FILE: str = "GeoLite2-City.mmdb"

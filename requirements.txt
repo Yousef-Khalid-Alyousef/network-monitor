@@ -1,2 +1,5 @@
 scapy
 requests
+python-dotenv
+maxminddb
+psutil

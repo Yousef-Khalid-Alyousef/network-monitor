@@ -1,68 +1,59 @@
-"""
-Geolocation lookups for external (public) IP addresses.
-
-Security improvements:
-  - Private IPs are filtered before making any network request.
-  - Request timeout is enforced (config.GEOLOCATION_TIMEOUT_SECONDS).
-  - Response JSON is validated before trusting any fields.
-  - Exceptions are caught and logged, never propagated to callers.
-"""
-
-import ipaddress
 import logging
-from typing import Optional
-
+import os
 import requests
+import maxminddb
+import ipaddress
 
 import config
 
 _log = logging.getLogger("network_monitor.geolocation")
 
+# We use a free, publicly maintained mirror of the MaxMind GeoLite2 City database.
+MMDB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
 
-def geolocate_ip(ip: str) -> Optional[dict]:
-    """Look up the geographical location of a public IP address.
+_reader = None
 
-    Returns a dict with 'country', 'region', 'city', 'isp' keys on success,
-    or None if the IP is private, the API call fails, or the response is bad.
-    """
-    # --- Validate and reject private IPs ---
+def init_geolocation() -> None:
+    global _reader
+    if not os.path.exists(config.MMDB_FILE):
+        _log.info(f"Downloading offline geolocation database to {config.MMDB_FILE}...")
+        try:
+            response = requests.get(MMDB_URL, stream=True, timeout=30)
+            response.raise_for_status()
+            with open(config.MMDB_FILE, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            _log.info("Database downloaded successfully.")
+        except Exception as e:
+            _log.error(f"Failed to download geolocation database: {e}")
+            return
+            
     try:
-        parsed = ipaddress.ip_address(ip)
-    except ValueError:
-        _log.debug("geolocate_ip: not a valid IP address: %r", ip)
-        return None
+        _reader = maxminddb.open_database(config.MMDB_FILE)
+    except Exception as e:
+        _log.error(f"Failed to open geolocation database: {e}")
 
-    if parsed.is_private or parsed.is_loopback or parsed.is_link_local or parsed.is_reserved:
-        return None
-
-    # --- Make the API request ---
-    url = config.GEOLOCATION_API.format(ip=ip)
+def get_location(ip: str) -> str:
+    """Returns a string like 'City, Country' or 'Unknown'."""
     try:
-        resp = requests.get(url, timeout=config.GEOLOCATION_TIMEOUT_SECONDS)
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.exceptions.Timeout:
-        _log.warning("Geolocation request timed out for %s", ip)
-        return None
-    except requests.exceptions.RequestException as exc:
-        _log.warning("Geolocation request failed for %s: %s", ip, exc)
-        return None
+        if ipaddress.ip_address(ip).is_private:
+            return "Local Network"
     except ValueError:
-        _log.warning("Geolocation API returned non-JSON for %s", ip)
-        return None
+        return "Invalid IP"
 
-    # --- Validate response structure ---
-    if not isinstance(data, dict):
-        _log.warning("Geolocation API returned unexpected type for %s", ip)
-        return None
+    if not _reader:
+        return "Unknown (DB not loaded)"
 
-    if data.get("status") != "success":
-        _log.debug("Geolocation API returned non-success for %s: %s", ip, data.get("message"))
-        return None
-
-    return {
-        "country": str(data.get("country", "Unknown")),
-        "region": str(data.get("regionName", "Unknown")),
-        "city": str(data.get("city", "Unknown")),
-        "isp": str(data.get("isp", "Unknown")),
-    }
+    try:
+        match = _reader.get(ip)
+        if not match:
+            return "Unknown"
+        
+        city = match.get("city", {}).get("names", {}).get("en", "Unknown City")
+        country = match.get("country", {}).get("names", {}).get("en", "Unknown Country")
+        
+        if city == "Unknown City":
+            return country
+        return f"{city}, {country}"
+    except Exception:
+        return "Unknown Error"
