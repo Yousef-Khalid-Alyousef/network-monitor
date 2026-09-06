@@ -12,6 +12,7 @@ _log = logging.getLogger("network_monitor.geolocation")
 MMDB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
 
 _reader = None
+_my_public_ip = None
 
 def init_geolocation() -> None:
     global _reader
@@ -32,12 +33,21 @@ def init_geolocation() -> None:
         _reader = maxminddb.open_database(config.MMDB_FILE)
     except Exception as e:
         _log.error(f"Failed to open geolocation database: {e}")
+        
+    try:
+        global _my_public_ip
+        _my_public_ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
+    except Exception:
+        pass
 
 def get_location(ip: str) -> str:
     """Returns a string like 'City, Country' or 'Unknown'."""
     try:
         if ipaddress.ip_address(ip).is_private:
-            return "Local Network"
+            if _my_public_ip:
+                ip = _my_public_ip
+            else:
+                return "Local Network"
     except ValueError:
         return "Invalid IP"
 
