@@ -1,0 +1,7 @@
+.env
+*.db
+*.mmdb
+*.log
+__pycache__/
+.venv/
+known_devices.json
